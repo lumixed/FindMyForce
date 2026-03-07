@@ -688,10 +688,17 @@ async function runEval() {
 // ── CLOCK ───────────────────────────────────────────────────────────────────
 function updateClock() {
     const now = new Date();
-    const h = String(now.getUTCHours()).padStart(2, '0');
-    const m = String(now.getUTCMinutes()).padStart(2, '0');
-    const s = String(now.getUTCSeconds()).padStart(2, '0');
-    document.getElementById('clock').textContent = `${h}:${m}:${s}`;
+
+    // Format the time in America/Vancouver timezone
+    const timeStr = now.toLocaleTimeString('en-CA', {
+        timeZone: 'America/Vancouver',
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+
+    document.getElementById('clock').textContent = timeStr + ' PST';
 }
 
 // ── TOAST ────────────────────────────────────────────────────────────────────
