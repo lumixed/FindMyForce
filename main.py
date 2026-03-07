@@ -42,10 +42,10 @@ def cmd_server(args):
     # The provided edit block is syntactically broken, so I will fix it to be valid Python.
     port = args.port
     print(f"\n{'='*58}")
-    print(f"║           FIND MY FORCE — RF COP Dashboard               ║")
-    print(f"║                                                          ║")
-    print(f"║  Dashboard:  http://localhost:{port:<23}║")
-    print(f"║  API:        http://localhost:{port}/api/status{' '*14}║")
+    print(f"  FIND MY FORCE -- RF COP Dashboard")
+    print(f"{'='*58}")
+    print(f"  Dashboard:  http://localhost:{port}")
+    print(f"  API:        http://localhost:{port}/api/status")
     print(f"{'='*58}\n")
     from server import app, socketio, initialize_system
     threading.Thread(target=initialize_system, daemon=True).start()
@@ -129,20 +129,21 @@ def cmd_score(args):
         return
 
     print(f"\n{'='*50}")
-        
-    try:
-        resp = requests.get(f"{api_url}/scores/me", headers={"X-API-Key": api_key})
-        resp.raise_for_status()
-        result = resp.json()
-        
-        print("\n=== CURRENT SCORE ===")
-        print(f"Total: {result.get('total_score', 0):.1f}")
-        print(f"Classification: {result.get('classification_score', 0):.1f}")
-        print(f"Geolocation: {result.get('geolocation_score', 0):.1f}")
-        print(f"Novelty: {result.get('novelty_score', 0):.1f}")
-        print("=====================\n")
-    except Exception as e:
-        logger.error(f"Failed to fetch score: {e}")
+    print(f"  TEAM: {score.get('team_name', '–')}")
+    print(f"{'='*50}")
+    print(f"  Total Score:         {score.get('total_score', 0):.1f}")
+    print(f"  Classification:      {score.get('classification_score', 0):.1f}  (40%)")
+    print(f"  Geolocation:         {score.get('geolocation_score', 0):.1f}  (30%)")
+    print(f"  Novelty Detection:   {score.get('novelty_detection_score', 0):.1f}  (30%)")
+    print(f"  Submissions:         {score.get('submissions_count', 0)}")
+    print(f"  Avg CEP:             {score.get('average_cep_meters', 'N/A')}m")
+    print(f"{'='*50}\n")
+
+    pcs = score.get('per_class_scores', [])
+    if pcs:
+        print("  Per-class scores:")
+        for cls in pcs:
+            print(f"    {cls['label']:<25} F1={cls['f1']:.3f}  count={cls['count']}")
 
 def run_eval():
     """Run the official evaluation submission pipeline."""
@@ -180,7 +181,7 @@ def main():
     elif args.command == "stream":
         cmd_stream(args)
     elif args.command == "score":
-        get_score()
+        cmd_score(args)
     elif args.command == "eval":
         run_eval()
 
