@@ -12,9 +12,10 @@ import logging
 from pathlib import Path
 
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier, VotingClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.svm import OneClassSVM
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder, QuantileTransformer
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.metrics import classification_report, f1_score
 from sklearn.covariance import EllipticEnvelope
 from sklearn.pipeline import Pipeline
@@ -72,6 +73,18 @@ def extract_features(iq_snapshot: list) -> np.ndarray:
     amp_skew = _skewness(amplitude)
     amp_kurt = _kurtosis(amplitude)
     crest_factor = amp_max / (amp_mean + 1e-10)
+
+    # ── High-Resolution Spectral features (512-PT FFT) ────────────────
+    spectrum_hires = np.abs(np.fft.fft(z, n=512)) ** 2
+    spectrum_hires_norm = spectrum_hires / (np.sum(spectrum_hires) + 1e-10)
+    peak_freq_hires = float(np.argmax(spectrum_hires_norm[:256]))
+    
+    # ── Haar Wavelet Decomposition (Simple Filter Bank) ──────────────
+    # Level 1 decomposition
+    cA = (z[0::2] + z[1::2]) / np.sqrt(2) # Low pass
+    cD = (z[0::2] - z[1::2]) / np.sqrt(2) # High pass
+    energy_low_wavelet = float(np.sum(np.abs(cA)**2))
+    energy_high_wavelet = float(np.sum(np.abs(cD)**2))
 
     # ── Phase features ───────────────────────────────────────────────
     phase = np.angle(z)
@@ -147,6 +160,92 @@ def extract_features(iq_snapshot: list) -> np.ndarray:
     # Peak-to-Average Power Ratio (PAPR)
     papr = float(amp_max**2 / (total_power + 1e-10))
 
+    # Spectral Shape Stats
+    spec_skew = _skewness(spectrum_norm)
+    spec_kurt = _kurtosis(spectrum_norm)
+    
+    # Band Energy (sub-band distribution)
+    # Total spectrum length is 128
+    energy_low = np.sum(spectrum_norm[:32])
+    energy_mid_low = np.sum(spectrum_norm[32:64])
+    energy_mid_high = np.sum(spectrum_norm[64:96])
+    energy_high = np.sum(spectrum_norm[96:])
+
+    # ── Higher Order Cumulants (HOC) ─────────────────────────────────
+    # Normalized moments capture modulation "envelope" shape
+    z_norm = (z - np.mean(z)) / (np.std(z) + 1e-10)
+    e_z2 = np.mean(z_norm**2)
+    e_absz2 = np.mean(np.abs(z_norm)**2)
+    e_z4 = np.mean(z_norm**4)
+    e_absz4 = np.mean(np.abs(z_norm)**4)
+    
+    c40 = e_z4 - 3 * (e_z2**2)
+    c42 = e_absz4 - np.abs(e_z2)**2 - 2 * (e_absz2**2)
+    
+    c40_norm = np.abs(c40)
+    c42_norm = np.abs(c42)
+
+    # ── Phase Histogram (Catch M-PSK signatures) ─────────────────────
+    # Standardize phase to [0, 2pi]
+    phase_std_range = (phase + np.pi) % (2 * np.pi)
+    phase_hist, _ = np.histogram(phase_std_range, bins=8, range=(0, 2*np.pi), density=True)
+
+    # ── Autocorrelation (Multi-Lag) ──────────────────────────────────
+    def get_autocorr(lag):
+        if len(z) > lag:
+            r = np.sum(z[lag:] * np.conj(z[:-lag])) / (np.sum(np.abs(z)**2) + 1e-10)
+            return np.abs(r), np.angle(r)
+        return 0.0, 0.0
+
+    r1_mag, r1_phase = get_autocorr(1)
+    r2_mag, r2_phase = get_autocorr(2)
+    r4_mag, r4_phase = get_autocorr(4)
+    r8_mag, r8_phase = get_autocorr(8)
+    
+    # Autocorrelation Peak (Symbol Rate Proxy)
+    # Exclude the DC peak at lag 0
+    all_lags = [get_autocorr(l)[0] for l in range(1, 32)]
+    r_peak_val = np.max(all_lags)
+    r_peak_lag = np.argmax(all_lags) + 1
+
+    # ── Block-based Temporal Features (Intra-pulse dynamics) ──────────
+    # Divide 128 samples into 4 blocks of 32
+    z_blocks = np.split(z, 4)
+    block_amps = [np.std(np.abs(b)) for b in z_blocks]
+    block_phases = [np.std(np.unwrap(np.angle(b))) for b in z_blocks]
+    block_amp_var = np.var(block_amps)
+    block_phase_var = np.var(block_phases)
+
+    # ── Fractional Moments ───────────────────────────────────────────
+    amp_05 = np.mean(np.sqrt(amplitude + 1e-10))
+    amp_15 = np.mean(amplitude**1.5)
+
+    # ── LPC (Linear Predictive Coding) Coefficients (8) ──────────────
+    # Using Yule-Walker method with autocorrelation
+    def get_lpc(p=8):
+        # We already have autocorrelation up to lag 31 from previous step
+        # Let's use it for the Yule-Walker equations
+        r_lpc = [1.0] + all_lags[:p]
+        # Construct Toeplitz matrix
+        from scipy.linalg import toeplitz, solve
+        R = toeplitz(r_lpc[:p])
+        r_vec = np.array(r_lpc[1:p+1])
+        try:
+            a = solve(R, r_vec)
+            return a.tolist()
+        except:
+            return [0.0] * p
+
+    try:
+        from scipy.linalg import toeplitz, solve
+        lpc_coeffs = get_lpc(8)
+    except:
+        lpc_coeffs = [0.0] * 8
+
+    # ── Phase Stability ──────────────────────────────────────────────
+    # Variance of the phase difference (jitter)
+    phase_jitter = np.var(np.abs(phase_diff))
+
     # ── Higher-order statistics ──────────────────────────────────────
     i_std = np.std(I)
     q_std = np.std(Q)
@@ -172,9 +271,25 @@ def extract_features(iq_snapshot: list) -> np.ndarray:
         spectral_centroid, spectral_flatness, peak_freq_idx,
         # Top 5 spectral peaks (5)
         *top5_peaks,
-        # Pulsed/modulation features (6)
-        duty_cycle, zcr_amp, ask_ratio, freq_linearity,
-        spec_rolloff, papr,
+        # Advanced modulation stats (8)
+        spec_rolloff, papr, spec_skew, spec_kurt,
+        energy_low, energy_mid_low, energy_mid_high, energy_high,
+        # HOC (2)
+        c40_norm, c42_norm,
+        # Phase Histogram (8)
+        *phase_hist,
+        # High-res and Wavelet (3)
+        peak_freq_hires, energy_low_wavelet, energy_high_wavelet,
+        # Autocorrelation Peak (2)
+        r_peak_val, float(r_peak_lag),
+        # Block-based temporal (10)
+        *block_amps, *block_phases, block_amp_var, block_phase_var,
+        # Fractional moments (2)
+        amp_05, amp_15,
+        # LPC (8)
+        *lpc_coeffs,
+        # Phase Stability (1)
+        phase_jitter,
         # IQ correlation stats (4)
         i_std, q_std, iq_corr, noise_floor,
         # ZCR (2)
@@ -211,7 +326,7 @@ class SignalClassifier:
 
     def __init__(self):
         self.friendly_classifier = None
-        self.scaler = StandardScaler()
+        self.scaler = QuantileTransformer(output_distribution='normal', n_quantiles=1000, random_state=42)
         self.label_encoder = LabelEncoder()
         self.anomaly_detector = None
         self.is_trained = False
@@ -238,25 +353,49 @@ class SignalClassifier:
             X_scaled, y_enc, test_size=0.2, random_state=42, stratify=y_enc
         )
 
-        # Train multi-class friendly classifier (Hybrid Ensemble for maximum score)
-        rf = RandomForestClassifier(
-            n_estimators=200,
-            max_depth=15,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1
+        # Train multi-class friendly classifier (Optimized HGB with Search)
+        hgb = HistGradientBoostingClassifier(random_state=42, early_stopping=True)
+        
+        param_dist = {
+            'max_iter': [500, 1000, 1500],
+            'max_depth': [15, 20, 30],
+            'learning_rate': [0.01, 0.03, 0.05, 0.1],
+            'l2_regularization': [0.0, 0.1, 0.5, 1.0, 5.0],
+            'min_samples_leaf': [5, 10, 20, 50]
+        }
+        
+        search = RandomizedSearchCV(
+            hgb, param_distributions=param_dist, 
+            n_iter=20, cv=3, scoring='f1_macro', 
+            n_jobs=-1, random_state=42
         )
-        hgb = HistGradientBoostingClassifier(
-            max_iter=400,
-            max_depth=15,
-            learning_rate=0.03,
-            min_samples_leaf=10,
-            l2_regularization=0.5,
+        
+        logger.info("Starting hyperparameter search...")
+        search.fit(X_tr, y_tr)
+        self.friendly_classifier = search.best_estimator_
+        logger.info(f"Best params: {search.best_params_}")
+
+        # Feature Importance Analysis (using RF as a proxy)
+        rf_proxy = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+        rf_proxy.fit(X_tr, y_tr)
+        importances = rf_proxy.feature_importances_
+        logger.info(f"Top 5 Feature Importances: {np.sort(importances)[-5:][::-1]}")
+        top_indices = np.argsort(importances)[-10:]
+        logger.info(f"Top 10 Feature Indices: {top_indices}")
+
+        # Ensemble HGB with an MLP for non-linear decision boundaries
+        mlp = MLPClassifier(
+            hidden_layer_sizes=(128, 64), 
+            activation='relu', 
+            solver='adam', 
+            alpha=0.01,
+            max_iter=500,
+            early_stopping=True,
             random_state=42
         )
         
         self.friendly_classifier = VotingClassifier(
-            estimators=[('rf', rf), ('hgb', hgb)],
+            estimators=[('hgb', self.friendly_classifier), ('mlp', mlp)],
             voting='soft'
         )
         self.friendly_classifier.fit(X_tr, y_tr)

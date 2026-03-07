@@ -174,9 +174,21 @@ class ObservationAssociator:
         import uuid
         group_id = f"GRP-{str(uuid.uuid4())[:8].upper()}"
 
-        # Use highest-confidence classification
-        best_cls = max(members, key=lambda o: o["_classification"]["confidence"])
-        cls = best_cls["_classification"]
+        # Weighted Majority Vote for classification
+        # We sum the confidence scores for each label to find the strongest consensus
+        label_tally = defaultdict(float)
+        for m in members:
+            cls = m["_classification"]
+            label_tally[cls["label"]] += cls["confidence"]
+        
+        # Determine winning label
+        final_label = max(label_tally, key=label_tally.get)
+        
+        # Get the representative classification data for the winning label
+        # We take the one with the highest confidence among the winning label members
+        winning_members = [m for m in members if m["_classification"]["label"] == final_label]
+        best_m = max(winning_members, key=lambda o: o["_classification"]["confidence"])
+        cls_info = best_m["_classification"]
 
         # Average timestamp
         timestamps = [m["_parsed_ts"] for m in members]
@@ -186,11 +198,11 @@ class ObservationAssociator:
             group_id=group_id,
             observations=[{k: v for k, v in m.items() if not k.startswith("_")} for m in members],
             timestamp=avg_ts,
-            classification_label=cls["label"],
-            classification_confidence=float(cls["confidence"]),
-            is_friendly=bool(cls["is_friendly"]),
-            is_anomaly=bool(cls["is_anomaly"]),
-            ood_score=float(cls.get("ood_score", 0.0)),
+            classification_label=final_label,
+            classification_confidence=float(cls_info["confidence"]),
+            is_friendly=bool(cls_info["is_friendly"]),
+            is_anomaly=bool(cls_info["is_anomaly"]),
+            ood_score=float(cls_info.get("ood_score", 0.0)),
         )
 
 
