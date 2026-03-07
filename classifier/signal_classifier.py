@@ -372,18 +372,43 @@ class SignalClassifier:
 def load_training_data(hdf5_path: str) -> tuple[np.ndarray, np.ndarray]:
     """
     Load labeled IQ training data from HDF5 file.
+    The HDF5 file is expected to have datasets where the key is a string
+    representation of a tuple (label, instance_id), e.g., "('802.11a', 'instance_0')".
     Returns (X_features, y_labels) arrays.
     """
     import h5py
+    import ast # For safely evaluating string-encoded tuples
     logger.info(f"Loading training data from {hdf5_path}")
 
     X_list = []
     y_list = []
 
     with h5py.File(hdf5_path, "r") as f:
-        # Explore structure
-        logger.info(f"HDF5 keys: {list(f.keys())}")
-        _load_hdf5_recursive(f, X_list, y_list)
+        for key in f.keys():
+            try:
+                # Keys are 4-element tuples: (modulation, label, snr_int, sample_idx)
+                # e.g. "('fmcw', 'Radar-Altimeter', 8, 0)"
+                t = ast.literal_eval(key)
+                if not isinstance(t, tuple) or len(t) < 2:
+                    continue
+                label = str(t[1])
+            except (ValueError, SyntaxError):
+                continue
+
+            dataset = f[key]
+            data = dataset[()]
+
+            if data.ndim == 2 and data.shape[1] == 256:
+                # Matrix of samples
+                for sample in data:
+                    X_list.append(sample)
+                    y_list.append(label)
+            elif data.ndim == 1 and len(data) == 256:
+                # Single sample
+                X_list.append(data)
+                y_list.append(label)
+            else:
+                logger.warning(f"Skipping dataset '{key}': unexpected shape {data.shape}")
 
     if not X_list:
         raise ValueError("No data found in HDF5 file")
@@ -398,58 +423,5 @@ def load_training_data(hdf5_path: str) -> tuple[np.ndarray, np.ndarray]:
     logger.info(f"Loaded {len(X_feat)} samples, shape={X_feat.shape}")
     logger.info(f"Class distribution: {dict(zip(*np.unique(y_raw, return_counts=True)))}")
 
+
     return X_feat, y_raw
-
-
-def _load_hdf5_recursive(node, X_list: list, y_list: list, label_path: str = ""):
-    """Recursively traverse HDF5 file and collect IQ data with labels."""
-    import h5py
-    for key in node.keys():
-        item = node[key]
-        current_path = f"{label_path}/{key}" if label_path else key
-
-        if isinstance(item, h5py.Dataset):
-            # This is actual data
-            data = item[()]
-            if data.ndim == 2 and data.shape[1] == 256:
-                # Matrix of samples
-                for sample in data:
-                    X_list.append(sample)
-                    # Extract label from path
-                    label = _infer_label_from_path(current_path)
-                    y_list.append(label)
-            elif data.ndim == 1 and len(data) == 256:
-                # Single sample
-                X_list.append(data)
-                label = _infer_label_from_path(current_path)
-                y_list.append(label)
-        elif isinstance(item, h5py.Group):
-            _load_hdf5_recursive(item, X_list, y_list, current_path)
-
-
-def _infer_label_from_path(path: str) -> str:
-    """Infer signal label from HDF5 path structure."""
-    path_lower = path.lower()
-
-    # Check for known signal types (case-insensitive)
-    if "radar" in path_lower and "altimeter" in path_lower:
-        return "Radar-Altimeter"
-    elif "satcom" in path_lower or "bpsk" in path_lower:
-        return "Satcom"
-    elif "short" in path_lower and "range" in path_lower:
-        return "short-range"
-    elif "bluetooth" in path_lower or "gfsk" in path_lower:
-        return "short-range"  # Map to closest friendly
-    elif "wifi" in path_lower or "802.11" in path_lower:
-        return "Radar-Altimeter"  # Placeholder - will be overridden by actual labels
-    elif "zigbee" in path_lower or "802.15" in path_lower:
-        return "Satcom"  # Placeholder
-
-    # Try to extract label from the path component
-    parts = path.split("/")
-    for part in parts:
-        for label in FRIENDLY_LABELS:
-            if label.lower().replace("-", "") in part.lower().replace("-", ""):
-                return label
-
-    return parts[-2] if len(parts) >= 2 else parts[-1]
