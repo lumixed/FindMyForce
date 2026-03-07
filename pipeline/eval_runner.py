@@ -44,9 +44,17 @@ def guess_hostile_type(features: dict) -> str:
         return "AM radio"
         
     # 3. Pulsed radars have silent gaps between pings (duty cycle < 0.85)
-    # The different radar types (Airborne-detection, Airborne-range) operate at
-    # different pulse widths (duty cycles ~0.50 vs ~0.70). 
-    # Since we just need to flag them as Hostile, we map them all to Airborne-detection.
+    # Based on live feed sampling, there are exactly 3 distinct populations:
+    # A) Duty cycle ~0.50 -> Air-Ground-MTI
+    if duty_cycle < 0.60:
+        return "Air-Ground-MTI"
+        
+    # B) Duty cycle ~0.70 with strong negative Frequency Linearity (Chirped pulse) -> Airborne-range
+    freq_linearity = features.get("freq_linearity", 0.0)
+    if freq_linearity < -0.10:
+        return "Airborne-range"
+        
+    # C) Duty cycle ~0.70 with zero or positive linearity -> Airborne-detection
     return "Airborne-detection"
 
 def run_evaluation_pipeline():
