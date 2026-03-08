@@ -40,49 +40,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
-app = Flask(__name__, static_folder=str(ROOT_DIR / "dashboard" / "static"))
+# ── Flask App ─────────────────────────────────────────────────────────────────
+app = Flask(__name__, 
+            static_folder=str(ROOT_DIR / "dashboard" / "static"),
+            static_url_path='/static')
 app.config["SECRET_KEY"] = os.urandom(24)
 CORS(app)
-
-@app.route("/api/score/fetch", methods=["GET"])
-def fetch_score():
-    """Fetch current official score from the backend API."""
-    import requests
-    api_key = os.getenv("API_KEY")
-    api_url = os.getenv("API_URL", "https://findmyforce.online")
-    if not api_key:
-        return jsonify({"error": "Missing API Key"}), 401
-        
-    try:
-        resp = requests.get(f"{api_url}/scores/me", headers={"X-API-Key": api_key}, timeout=10)
-        if not resp.ok:
-            try:
-                body = resp.json()
-            except Exception:
-                body = {"error": resp.text or resp.reason}
-            return jsonify(body), resp.status_code
-        return jsonify(resp.json())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/eval/run", methods=["POST"])
-def run_eval():
-    """Trigger the official evaluation pipeline run."""
-    try:
-        from pipeline.eval_runner import run_evaluation_pipeline
-        # We run it in a separate thread so we can return quickly to the UI
-        import threading
-        t = threading.Thread(target=run_evaluation_pipeline)
-        t.start()
-        return jsonify({"status": "Evaluation calculation started. Check logs for completion."})
-    except Exception as e:
-        logger.error(f"Error starting evaluation: {e}")
-        return jsonify({"error": str(e)}), 500
 
 # =========================================================================
 # Socket.IO Handlers
 # =========================================================================
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+# Use gevent or eventlet if available, fallback to threading
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 
 # ── Global State ──────────────────────────────────────────────────────────────
 g_classifier = SignalClassifier()
@@ -107,21 +76,29 @@ g_server_status = {
 
 
 # ── Initialization ─────────────────────────────────────────────────────────────
-def initialize_system():
+_initialized = False
+
+def initialize_system(force=False):
     """
     Initialize the full pipeline:
     1. Fetch receiver config & path loss from API
-    2. Load/train classifier
-    3. Start feed consumer
+    2. Load classifier
+    3. Start feed consumer (if not in serverless mode)
     """
-    global g_geolocator, g_feed_consumer, g_eval_submitter
+    global g_geolocator, g_feed_consumer, g_eval_submitter, _initialized
     global g_receiver_config, g_pathloss_config
 
+    if _initialized and not force:
+        return
+    
     logger.info("=== Initializing Find My Force Pipeline ===")
 
-    # 1. Fetch server config
-    logger.info("Fetching receiver config and path loss model...")
-    rx_data, pl_data = get_config()
+    # 1. Fetch server config (Fast)
+    try:
+        rx_data, pl_data = get_config()
+    except Exception as e:
+        logger.error(f"Failed to fetch config: {e}")
+        rx_data, pl_data = None, None
 
     if rx_data:
         g_receiver_config = rx_data
@@ -160,83 +137,97 @@ def initialize_system():
     # 2. Initialize geolocator
     g_geolocator = GeolocatorEngine(receivers, pathloss)
 
-    # 3. Try to load existing classifier
-    model_loaded = g_classifier.load()
-    if model_loaded:
-        g_server_status["classifier_trained"] = True
-        logger.info("Pre-trained classifier loaded from disk")
+    # 3. Try to load existing classifier (Essential for prediction)
+    try:
+        model_loaded = g_classifier.load()
+        if model_loaded:
+            g_server_status["classifier_trained"] = True
+            logger.info("Pre-trained classifier loaded from disk")
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
 
     # 4. Initialize eval submitter
     g_eval_submitter = EvalSubmitter(g_classifier, g_geolocator)
 
-    # 5. Start feed consumer
-    def on_track_update(track_dict, geo_result):
-        """Callback: broadcast track updates to connected clients."""
-        socketio.emit("track_update", {
-            "track": track_dict,
-            "all_tracks": g_track_manager.get_all_as_dict(),
-            "stats": g_track_manager.get_stats(),
-        })
+    # 5. Start feed consumer (ONLY if not on Vercel/Serverless)
+    # Vercel doesn't allow background processes/SSE listeners
+    is_vercel = os.getenv("VERCEL") == "1"
+    
+    if not is_vercel:
+        def on_track_update(track_dict, geo_result):
+            socketio.emit("track_update", {
+                "track": track_dict,
+                "all_tracks": g_track_manager.get_all_as_dict(),
+                "stats": g_track_manager.get_stats(),
+            })
 
-    def on_observation(obs):
-        """Callback: broadcast raw observations to connected clients."""
-        global g_recent_observations
-        light_obs = {
-            "observation_id": obs.get("observation_id"),
-            "receiver_id": obs.get("receiver_id"),
-            "rssi_dbm": obs.get("rssi_dbm"),
-            "snr_estimate_db": obs.get("snr_estimate_db"),
-            "timestamp": obs.get("timestamp"),
-            "classification": obs.get("_classification"),
-        }
-        g_recent_observations.append(light_obs)
-        if len(g_recent_observations) > g_max_recent:
-            g_recent_observations = g_recent_observations[-g_max_recent:]
-        socketio.emit("observation", light_obs)
+        def on_observation(obs):
+            global g_recent_observations
+            light_obs = {
+                "observation_id": obs.get("observation_id"),
+                "receiver_id": obs.get("receiver_id"),
+                "rssi_dbm": obs.get("rssi_dbm"),
+                "snr_estimate_db": obs.get("snr_estimate_db"),
+                "timestamp": obs.get("timestamp"),
+                "classification": obs.get("_classification"),
+            }
+            g_recent_observations.append(light_obs)
+            if len(g_recent_observations) > g_max_recent:
+                g_recent_observations = g_recent_observations[-g_max_recent:]
+            socketio.emit("observation", light_obs)
 
-    g_feed_consumer = FeedConsumer(
-        classifier=g_classifier,
-        associator=g_associator,
-        geolocator=g_geolocator,
-        track_manager=g_track_manager,
-        on_track_update=on_track_update,
-        on_observation=on_observation,
-    )
-    g_feed_consumer.start()
-    g_server_status["pipeline_running"] = True
-    logger.info("Pipeline started")
+        g_feed_consumer = FeedConsumer(
+            classifier=g_classifier,
+            associator=g_associator,
+            geolocator=g_geolocator,
+            track_manager=g_track_manager,
+            on_track_update=on_track_update,
+            on_observation=on_observation,
+        )
+        g_feed_consumer.start()
+        
+        # Periodic loops
+        def submission_loop():
+            while True:
+                try:
+                    if g_feed_consumer: g_feed_consumer.submit_queued()
+                except: pass
+                time.sleep(2.0)
+        
+        def broadcast_loop():
+            while True:
+                try:
+                    socketio.emit("tracks_broadcast", {
+                        "tracks": g_track_manager.get_all_as_dict(),
+                        "stats": g_track_manager.get_stats(),
+                        "feed_stats": g_feed_consumer.stats if g_feed_consumer else {},
+                    })
+                except: pass
+                time.sleep(5.0)
 
-    # 6. Start periodic submission thread
-    def submission_loop():
-        while True:
-            try:
-                if g_feed_consumer and g_server_status["pipeline_running"]:
-                    g_feed_consumer.submit_queued()
-            except Exception as e:
-                logger.warning(f"Submission loop error: {e}")
-            time.sleep(2.0)
+        threading.Thread(target=submission_loop, daemon=True).start()
+        threading.Thread(target=broadcast_loop, daemon=True).start()
+        
+        g_server_status["pipeline_running"] = True
+        logger.info("Background pipeline started")
+    else:
+        logger.info("Serverless mode: Background pipeline disabled")
+        g_server_status["pipeline_running"] = False
 
-    threading.Thread(target=submission_loop, daemon=True).start()
+    _initialized = True
 
-    # 7. Start periodic broadcast thread (send track state even without events)
-    def broadcast_loop():
-        while True:
-            try:
-                socketio.emit("tracks_broadcast", {
-                    "tracks": g_track_manager.get_all_as_dict(),
-                    "stats": g_track_manager.get_stats(),
-                    "feed_stats": g_feed_consumer.stats if g_feed_consumer else {},
-                })
-            except Exception as e:
-                pass
-            time.sleep(5.0)
-
-    threading.Thread(target=broadcast_loop, daemon=True).start()
-
-    logger.info("=== Pipeline initialization complete ===")
+@app.before_request
+def ensure_initialized():
+    """Ensure system is initialized before first request on Vercel."""
+    if not _initialized:
+        initialize_system()
 
 
 # ── REST API Endpoints ─────────────────────────────────────────────────────────
+
+@app.route("/api/health")
+def api_health():
+    return jsonify({"status": "healthy", "initialized": _initialized, "serverless": os.getenv("VERCEL") == "1"})
 
 @app.route("/api/status")
 def api_status():
@@ -244,7 +235,7 @@ def api_status():
     health = None
     try:
         import requests as req
-        r = req.get(f"{g_server_status['api_url']}/health", timeout=3)
+        r = req.get(f"{g_server_status['api_url']}/health", timeout=2)
         health = r.json() if r.status_code == 200 else None
     except Exception:
         pass
@@ -252,7 +243,7 @@ def api_status():
     return jsonify({
         "system": g_server_status,
         "server_health": health,
-        "tracks": g_track_manager.get_stats(),
+        "tracks": g_track_manager.get_stats() if g_track_manager else {},
         "feed_stats": g_feed_consumer.stats if g_feed_consumer else {},
         "receiver_config": g_receiver_config,
         "pathloss_config": g_pathloss_config,
@@ -263,23 +254,38 @@ def api_status():
 def api_tracks():
     """Return all active tracks."""
     return jsonify({
-        "tracks": g_track_manager.get_all_as_dict(),
-        "stats": g_track_manager.get_stats(),
+        "tracks": g_track_manager.get_all_as_dict() if g_track_manager else [],
+        "stats": g_track_manager.get_stats() if g_track_manager else {},
     })
+
+
+@app.route("/api/score/fetch", methods=["GET"])
+def fetch_official_score():
+    """Fetch current official score from the backend API."""
+    import requests
+    api_key = os.getenv("API_KEY")
+    api_url = os.getenv("API_URL", "https://findmyforce.online")
+    if not api_key:
+        return jsonify({"error": "Missing API Key"}), 401
+    try:
+        resp = requests.get(f"{api_url}/scores/me", headers={"X-API-Key": api_key}, timeout=5)
+        return (jsonify(resp.json()), resp.status_code) if resp.ok else (jsonify({"error": resp.reason}), resp.status_code)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/train", methods=["POST"])
 def api_train():
-    """Train classifier on uploaded HDF5 data."""
+    """Train classifier on uploaded HDF5 data (Disabled on Vercel)."""
+    if os.getenv("VERCEL") == "1":
+        return jsonify({"error": "Training is disabled in serverless mode. Train locally and push the model."}), 405
+    
     global g_server_status
-
     if g_server_status["training_in_progress"]:
         return jsonify({"error": "Training already in progress"}), 409
 
-    # Check for HDF5 file
     data_dir = ROOT_DIR / "data"
     hdf5_files = list(data_dir.glob("*.h5")) + list(data_dir.glob("*.hdf5"))
-
     if not hdf5_files:
         return jsonify({"error": "No HDF5 training file found in /data directory"}), 404
 
@@ -287,16 +293,12 @@ def api_train():
     g_server_status["training_in_progress"] = True
 
     def train_bg():
-        global g_server_status
         try:
-            logger.info(f"Training on {hdf5_path}")
             X, y = load_training_data(hdf5_path)
             metrics = g_classifier.train(X, y)
             g_classifier.save()
             g_server_status["classifier_trained"] = True
             g_server_status["training_metrics"] = metrics
-            g_server_status["error"] = None
-            logger.info(f"Training complete: {metrics}")
             socketio.emit("training_complete", {"metrics": metrics})
         except Exception as e:
             logger.error(f"Training error: {e}")
@@ -315,20 +317,18 @@ def api_classify():
     body = request.get_json()
     if not body or "iq_snapshot" not in body:
         return jsonify({"error": "No iq_snapshot provided"}), 400
-
-    result = g_classifier.predict(body["iq_snapshot"])
-    return jsonify(result)
+    return jsonify(g_classifier.predict(body["iq_snapshot"]))
 
 
 @app.route("/api/observations")
 def api_observations():
     """Return recent observations."""
-    return jsonify({"observations": g_recent_observations[-50:]})
+    return jsonify({"observations": g_recent_observations[-50:] if g_recent_observations else []})
 
 
 @app.route("/api/score")
-def api_score():
-    """Fetch score from the competition API."""
+def api_score_legacy():
+    """Alias for score fetch."""
     score = get_score()
     return jsonify(score or {"error": "Could not fetch score"})
 
@@ -339,6 +339,11 @@ def api_eval_run():
     if not g_eval_submitter:
         return jsonify({"error": "System not initialized"}), 503
 
+    # On Vercel, we must run it synchronously or it will be killed
+    if os.getenv("VERCEL") == "1":
+        result = g_eval_submitter.run_eval()
+        return jsonify({"result": result})
+    
     def run_bg():
         result = g_eval_submitter.run_eval()
         socketio.emit("eval_complete", {"result": result})
@@ -350,9 +355,7 @@ def api_eval_run():
 @app.route("/api/receivers")
 def api_receivers():
     """Return receiver configurations."""
-    if not g_receiver_config:
-        return jsonify({"receivers": []})
-    return jsonify(g_receiver_config)
+    return jsonify(g_receiver_config or {"receivers": []})
 
 
 # ── Frontend Serving ───────────────────────────────────────────────────────────
@@ -362,49 +365,43 @@ def index():
     """Serve the main COP dashboard."""
     return send_from_directory(str(ROOT_DIR / "dashboard"), "index.html")
 
-
 @app.route("/dashboard/<path:filename>")
-def dashboard_static(filename):
+def dashboard_static_serve(filename):
     return send_from_directory(str(ROOT_DIR / "dashboard"), filename)
-
-
-@app.route("/static/<path:filename>")
-def static_files(filename):
-    return send_from_directory(str(ROOT_DIR / "dashboard" / "static"), filename)
-
 
 # ── SocketIO Events ────────────────────────────────────────────────────────────
 
 @socketio.on("connect")
 def on_connect():
-    """Send initial state to newly connected client."""
-    logger.debug(f"Client connected: {request.sid}")
     emit("init", {
-        "tracks": g_track_manager.get_all_as_dict(),
-        "stats": g_track_manager.get_stats(),
+        "tracks": g_track_manager.get_all_as_dict() if g_track_manager else [],
+        "stats": g_track_manager.get_stats() if g_track_manager else {},
         "status": g_server_status,
         "receivers": g_receiver_config,
     })
 
-
 @socketio.on("request_tracks")
 def on_request_tracks():
     emit("tracks_broadcast", {
-        "tracks": g_track_manager.get_all_as_dict(),
-        "stats": g_track_manager.get_stats(),
+        "tracks": g_track_manager.get_all_as_dict() if g_track_manager else [],
+        "stats": g_track_manager.get_stats() if g_track_manager else {},
         "feed_stats": g_feed_consumer.stats if g_feed_consumer else {},
     })
 
-
 @socketio.on("request_eval")
 def on_request_eval():
+    if os.getenv("VERCEL") == "1":
+        result = g_eval_submitter.run_eval()
+        emit("eval_complete", {"result": result})
+        return
+    
     def run_bg():
         try:
             from pipeline.eval_runner import run_evaluation_pipeline
             result = run_evaluation_pipeline()
             socketio.emit("eval_complete", {"result": result})
         except Exception as exc:
-            logger.error(f"Eval pipeline error: {exc}", exc_info=True)
+            logger.error(f"Eval pipeline error: {exc}")
             socketio.emit("eval_complete", {"result": None, "error": str(exc)})
     threading.Thread(target=run_bg, daemon=True).start()
     emit("eval_started", {})
@@ -412,9 +409,11 @@ def on_request_eval():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Initialize in background thread (non-blocking)
-    threading.Thread(target=initialize_system, daemon=True).start()
-
+    # Initialize in background thread for local dev
+    initialize_system()
     port = int(os.getenv("PORT", 5000))
-    logger.info(f"Starting Find My Force dashboard on http://localhost:{port}")
+    logger.info(f"Starting dashboard on http://localhost:{port}")
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
+else:
+    # On Vercel, app is imported. Initialize here.
+    initialize_system()
