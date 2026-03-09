@@ -870,3 +870,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
     console.log('[APP] Find My Force COP initialized');
 });
+
+// ── KEYBOARD SHORTCUTS ────────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+    // Ignore if typing in search box
+    if (document.activeElement.id === 'track-search') return;
+
+    switch (e.key.toLowerCase()) {
+        case 't': // Toggle Trails
+            const trailToggle = document.getElementById('toggle-trails');
+            trailToggle.checked = !trailToggle.checked;
+            handleFilterChange();
+            toast(`Trails ${trailToggle.checked ? 'ENABLED' : 'DISABLED'}`, 'info');
+            break;
+        case 'p': // Toggle Projections
+            const projToggle = document.getElementById('toggle-projections');
+            projToggle.checked = !projToggle.checked;
+            handleFilterChange();
+            toast(`AI Projections ${projToggle.checked ? 'ENABLED' : 'DISABLED'}`, 'info');
+            break;
+        case 'c': // Clear Selection
+            clearSelection();
+            break;
+        case 'f': // Focus on Selected
+            if (selectedTrackId) selectTrack(selectedTrackId);
+            break;
+        case 'Escape':
+            clearSelection();
+            break;
+    }
+});
+
