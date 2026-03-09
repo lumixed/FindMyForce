@@ -189,8 +189,15 @@
             <!-- Track List -->
             <section class="panel-section flex-grow">
                 <div class="section-header">
-                    <span class="section-title">ACTIVE TRACKS</span>
-                    <span class="section-badge" id="track-count-badge">0</span>
+                    <div style="display:flex; align-items:center; gap:8px">
+                        <span class="section-title">ACTIVE TRACKS</span>
+                        <span class="section-badge" id="track-count-badge">0</span>
+                    </div>
+                    <button class="btn-icon" onclick="exportTracks()" title="Export CSV">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                        </svg>
+                    </button>
                 </div>
                 <div class="track-list" id="track-list">
                     <div class="empty-state">

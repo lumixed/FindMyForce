@@ -495,6 +495,31 @@ body {
     cursor: not-allowed;
 }
 
+.btn-icon {
+    background: transparent;
+    border: 1px solid var(--border-glass);
+    border-radius: 4px;
+    color: var(--text-dim);
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-icon:hover {
+    border-color: var(--col-accent);
+    color: var(--col-accent);
+    background: rgba(0, 245, 204, 0.05);
+}
+
+.btn-icon svg {
+    width: 14px;
+    height: 14px;
+}
+
 .training-progress {
     margin-top: 8px;
 }

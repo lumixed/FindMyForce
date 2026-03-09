@@ -677,6 +677,46 @@ function handleFilterChange() {
     renderTrackList();
 }
 
+/**
+ * Exports current active tracks to CSV
+ */
+function exportTracks() {
+    const tracks = Object.values(allTracks).filter(t => t.state !== 'lost');
+    if (tracks.length === 0) {
+        toast('No tracks to export', 'warning');
+        return;
+    }
+
+    const headers = ['track_id', 'affiliation', 'label', 'confidence', 'lat', 'lon', 'uncertainty_m', 'receivers', 'state'];
+    const rows = tracks.map(t => [
+        t.track_id,
+        t.affiliation,
+        t.classification_label,
+        (t.classification_confidence * 100).toFixed(1),
+        t.latitude,
+        t.longitude,
+        t.uncertainty_m,
+        t.n_receivers,
+        t.state
+    ]);
+
+    const csvContent = [
+        headers.join(','),
+        ...rows.map(r => r.join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `fmf_tracks_${new Date().getTime()}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast('Track data exported to CSV', 'success');
+}
+
 // ── ACTIONS ─────────────────────────────────────────────────────────────────
 async function trainModel() {
     const btn = document.getElementById('btn-train');
