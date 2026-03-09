@@ -644,6 +644,98 @@ body {
     box-shadow: 0 0 15px rgba(88, 86, 214, 0.2);
 }
 
+/* Smart Filter Additions */
+.search-box {
+    position: relative;
+    margin-bottom: 20px;
+}
+
+#track-search {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius);
+    padding: 10px 14px 10px 40px;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+#track-search:focus {
+    outline: none;
+    border-color: var(--col-accent);
+    box-shadow: 0 0 10px rgba(0, 245, 204, 0.1);
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.search-icon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 18px;
+    height: 18px;
+    color: var(--text-dim);
+    pointer-events: none;
+}
+
+.advanced-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px dashed var(--border);
+}
+
+.filter-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.filter-row label {
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-weight: 600;
+}
+
+#signal-filter {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    width: 100%;
+}
+
+#conf-filter {
+    width: 100%;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--bg-card);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+}
+
+#conf-filter::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    background: var(--col-accent);
+    border-radius: 50%;
+    box-shadow: 0 0 10px var(--col-accent);
+}
+
 /* ── TRACK LIST ──────────────────────────────────────────────────────────── */
 .track-list {
     flex: 1;
